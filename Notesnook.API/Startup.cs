@@ -34,6 +34,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.Connections;
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.ResponseCompression;
+using Microsoft.Extensions.Caching.Distributed;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -50,6 +51,8 @@ using Notesnook.API.Interfaces;
 using Notesnook.API.Models;
 using Notesnook.API.Repositories;
 using Notesnook.API.Services;
+using OpenTelemetry.Metrics;
+using OpenTelemetry.Resources;
 using Streetwriters.Common;
 using Streetwriters.Common.Extensions;
 using Streetwriters.Common.Messages;
@@ -73,12 +76,11 @@ namespace Notesnook.API
         // This method gets called by the runtime. Use this method to add services to the container.
         public void ConfigureServices(IServiceCollection services)
         {
-            var dbSettings = new DbSettings
+            services.AddSingleton(MongoDbContext.CreateMongoDbClient(new DbSettings
             {
                 ConnectionString = Constants.MONGODB_CONNECTION_STRING,
                 DatabaseName = Constants.MONGODB_DATABASE_NAME
-            };
-            services.AddSingleton<IDbSettings>(dbSettings);
+            }));
 
             services.TryAddSingleton<IHttpContextAccessor, HttpContextAccessor>();
 
@@ -106,22 +108,12 @@ namespace Notesnook.API
                     policy.RequireAuthenticatedUser();
                     policy.Requirements.Add(new SyncRequirement());
                 });
-                options.AddPolicy("Verified", policy =>
-                {
-                    policy.AuthenticationSchemes.Add("introspection");
-                    policy.RequireAuthenticatedUser();
-                    policy.Requirements.Add(new EmailVerifiedRequirement());
-                });
                 options.AddPolicy("Pro", policy =>
                 {
                     policy.AuthenticationSchemes.Add("introspection");
                     policy.RequireAuthenticatedUser();
+                    policy.Requirements.Add(new SyncRequirement());
                     policy.Requirements.Add(new ProUserRequirement());
-                });
-                options.AddPolicy("BasicAdmin", policy =>
-                {
-                    policy.AuthenticationSchemes.Add("BasicAuthentication");
-                    policy.RequireClaim(ClaimTypes.Role, "Admin");
                 });
 
                 options.DefaultPolicy = options.GetPolicy("Notesnook");
@@ -152,55 +144,49 @@ namespace Notesnook.API
                     context.HttpContext.User = context.Principal;
                     return Task.CompletedTask;
                 };
+                options.CacheKeyGenerator = (options, token) => (token + ":" + "reference_token").Sha256();
                 options.SaveToken = true;
                 options.EnableCaching = true;
                 options.CacheDuration = TimeSpan.FromMinutes(30);
             });
 
+            BsonSerializer.RegisterSerializer(new SyncItemBsonSerializer());
             if (!BsonClassMap.IsClassMapRegistered(typeof(UserSettings)))
-            {
                 BsonClassMap.RegisterClassMap<UserSettings>();
-            }
 
             if (!BsonClassMap.IsClassMapRegistered(typeof(EncryptedData)))
-            {
                 BsonClassMap.RegisterClassMap<EncryptedData>();
-            }
 
             if (!BsonClassMap.IsClassMapRegistered(typeof(CallToAction)))
-            {
                 BsonClassMap.RegisterClassMap<CallToAction>();
-            }
-
-            if (!BsonClassMap.IsClassMapRegistered(typeof(Announcement)))
-            {
-                BsonClassMap.RegisterClassMap<Announcement>();
-            }
 
             services.AddScoped<IDbContext, MongoDbContext>();
             services.AddScoped<IUnitOfWork, UnitOfWork>();
 
-            services.AddScoped((provider) => new Repository<UserSettings>(provider.GetRequiredService<IDbContext>(), "notesnook", "user_settings"));
-            services.AddScoped((provider) => new Repository<Monograph>(provider.GetRequiredService<IDbContext>(), "notesnook", "monographs"));
-            services.AddScoped((provider) => new Repository<Announcement>(provider.GetRequiredService<IDbContext>(), "notesnook", "announcements"));
-            services.AddScoped((provider) => new SyncItemsRepository<Attachment>(provider.GetRequiredService<IDbContext>(), "notesnook", "attachments"));
-            services.AddScoped((provider) => new SyncItemsRepository<Content>(provider.GetRequiredService<IDbContext>(), "notesnook", "content"));
-            services.AddScoped((provider) => new SyncItemsRepository<Note>(provider.GetRequiredService<IDbContext>(), "notesnook", "notes"));
-            services.AddScoped((provider) => new SyncItemsRepository<Notebook>(provider.GetRequiredService<IDbContext>(), "notesnook", "notebooks"));
-            services.AddScoped((provider) => new SyncItemsRepository<Relation>(provider.GetRequiredService<IDbContext>(), "notesnook", "relations"));
-            services.AddScoped((provider) => new SyncItemsRepository<Reminder>(provider.GetRequiredService<IDbContext>(), "notesnook", "reminders"));
-            services.AddScoped((provider) => new SyncItemsRepository<Setting>(provider.GetRequiredService<IDbContext>(), "notesnook", "settings"));
-            services.AddScoped((provider) => new SyncItemsRepository<Shortcut>(provider.GetRequiredService<IDbContext>(), "notesnook", "shortcuts"));
-            services.AddScoped((provider) => new SyncItemsRepository<Tag>(provider.GetRequiredService<IDbContext>(), "notesnook", "tags"));
-            services.AddScoped((provider) => new SyncItemsRepository<Color>(provider.GetRequiredService<IDbContext>(), "notesnook", "colors"));
+            services.AddRepository<UserSettings>("user_settings", "notesnook")
+                    .AddRepository<Monograph>("monographs", "notesnook")
+                    .AddRepository<Announcement>("announcements", "notesnook");
 
-            services.TryAddTransient<ISyncItemsRepositoryAccessor, SyncItemsRepositoryAccessor>();
-            services.TryAddTransient<IUserService, UserService>();
-            services.TryAddTransient<IS3Service, S3Service>();
+            services.AddMongoCollection(Collections.SettingsKey)
+                    .AddMongoCollection(Collections.AttachmentsKey)
+                    .AddMongoCollection(Collections.ContentKey)
+                    .AddMongoCollection(Collections.NotesKey)
+                    .AddMongoCollection(Collections.NotebooksKey)
+                    .AddMongoCollection(Collections.RelationsKey)
+                    .AddMongoCollection(Collections.RemindersKey)
+                    .AddMongoCollection(Collections.LegacySettingsKey)
+                    .AddMongoCollection(Collections.ShortcutsKey)
+                    .AddMongoCollection(Collections.TagsKey)
+                    .AddMongoCollection(Collections.ColorsKey)
+                    .AddMongoCollection(Collections.VaultsKey);
+
+            services.AddScoped<ISyncItemsRepositoryAccessor, SyncItemsRepositoryAccessor>();
+            services.AddScoped<IUserService, UserService>();
+            services.AddScoped<IS3Service, S3Service>();
 
             services.AddControllers();
 
-            services.AddHealthChecks().AddMongoDb(dbSettings.ConnectionString, dbSettings.DatabaseName, "database-check");
+            services.AddHealthChecks(); // .AddMongoDb(dbSettings.ConnectionString, dbSettings.DatabaseName, "database-check");
             services.AddSignalR((hub) =>
             {
                 hub.MaximumReceiveMessageSize = 100 * 1024 * 1024;
@@ -223,6 +209,13 @@ namespace Notesnook.API
             {
                 options.Level = CompressionLevel.Fastest;
             });
+
+            services.AddOpenTelemetry()
+                    .ConfigureResource(resource => resource
+                        .AddService(serviceName: "Notesnook.API"))
+                    .WithMetrics((builder) => builder
+                            .AddMeter("Notesnook.API.Metrics.Sync")
+                            .AddPrometheusExporter());
         }
 
         // This method gets called by the runtime. Use this method to configure the HTTP request pipeline.
@@ -236,17 +229,24 @@ namespace Notesnook.API
                 });
             }
 
+            app.UseOpenTelemetryPrometheusScrapingEndpoint((context) => context.Request.Path == "/metrics" && context.Connection.LocalPort == 5067);
             app.UseResponseCompression();
 
             app.UseCors("notesnook");
-            app.UseVersion();
+            app.UseVersion(Servers.NotesnookAPI);
 
             app.UseWamp(WampServers.NotesnookServer, (realm, server) =>
             {
-                IUserService service = app.GetScopedService<IUserService>();
-                realm.Subscribe<DeleteUserMessage>(server.Topics.DeleteUserTopic, async (ev) =>
+                realm.Subscribe<DeleteUserMessage>(IdentityServerTopics.DeleteUserTopic, async (ev) =>
                 {
-                    await service.DeleteUserAsync(ev.UserId, null);
+                    IUserService service = app.GetScopedService<IUserService>();
+                    await service.DeleteUserAsync(ev.UserId);
+                });
+
+                realm.Subscribe<ClearCacheMessage>(IdentityServerTopics.ClearCacheTopic, (ev) =>
+                {
+                    IDistributedCache cache = app.GetScopedService<IDistributedCache>();
+                    ev.Keys.ForEach((key) => cache.Remove(key));
                 });
             });
 
@@ -257,6 +257,7 @@ namespace Notesnook.API
 
             app.UseEndpoints(endpoints =>
             {
+                endpoints.MapPrometheusScrapingEndpoint();
                 endpoints.MapControllers();
                 endpoints.MapHealthChecks("/health");
                 endpoints.MapHub<SyncHub>("/hubs/sync", options =>
@@ -264,7 +265,21 @@ namespace Notesnook.API
                     options.CloseOnAuthenticationExpiration = false;
                     options.Transports = HttpTransportType.WebSockets;
                 });
+                endpoints.MapHub<SyncV2Hub>("/hubs/sync/v2", options =>
+                {
+                    options.CloseOnAuthenticationExpiration = false;
+                    options.Transports = HttpTransportType.WebSockets;
+                });
             });
+        }
+    }
+
+    public static class ServiceCollectionMongoCollectionExtensions
+    {
+        public static IServiceCollection AddMongoCollection(this IServiceCollection services, string collectionName, string database = "notesnook")
+        {
+            services.AddKeyedSingleton(collectionName, (provider, key) => MongoDbContext.GetMongoCollection<SyncItem>(provider.GetService<MongoDB.Driver.IMongoClient>(), database, collectionName));
+            return services;
         }
     }
 }

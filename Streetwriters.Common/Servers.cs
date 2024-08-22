@@ -34,7 +34,7 @@ namespace Streetwriters.Common
             if (!string.IsNullOrEmpty(originCertPath) && !string.IsNullOrEmpty(originCertKeyPath))
                 this.SSLCertificate = X509Certificate2.CreateFromPemFile(originCertPath, originCertKeyPath);
         }
-
+        public string Id { get; set; }
         public int Port { get; set; }
         public string Hostname { get; set; }
         public string Domain { get; set; }
@@ -63,13 +63,13 @@ namespace Streetwriters.Common
     public class Servers
     {
 #if DEBUG
-        public static string GetLocalIPv4(NetworkInterfaceType _type)
+        public static string GetLocalIPv4()
         {
             var interfaces = NetworkInterface.GetAllNetworkInterfaces();
             string output = "";
             foreach (NetworkInterface item in interfaces)
             {
-                if (item.NetworkInterfaceType == _type && item.OperationalStatus == OperationalStatus.Up)
+                if ((item.NetworkInterfaceType == NetworkInterfaceType.Ethernet || item.NetworkInterfaceType == NetworkInterfaceType.Wireless80211) && item.OperationalStatus == OperationalStatus.Up)
                 {
                     foreach (UnicastIPAddressInformation ip in item.GetIPProperties().UnicastAddresses)
                     {
@@ -82,7 +82,7 @@ namespace Streetwriters.Common
             }
             return output;
         }
-        public readonly static string HOST = GetLocalIPv4(NetworkInterfaceType.Ethernet);
+        public readonly static string HOST = GetLocalIPv4();
         public static Server S3Server { get; } = new()
         {
             Port = 4568,
@@ -95,6 +95,7 @@ namespace Streetwriters.Common
             Domain = Constants.NOTESNOOK_SERVER_DOMAIN,
             Port = Constants.NOTESNOOK_SERVER_PORT,
             Hostname = Constants.NOTESNOOK_SERVER_HOST,
+            Id = "notesnook-sync"
         };
 
         public static Server MessengerServer { get; } = new(Constants.SSE_CERT_PATH, Constants.SSE_CERT_KEY_PATH)
@@ -102,6 +103,7 @@ namespace Streetwriters.Common
             Domain = Constants.SSE_SERVER_DOMAIN,
             Port = Constants.SSE_SERVER_PORT,
             Hostname = Constants.SSE_SERVER_HOST,
+            Id = "sse"
         };
 
         public static Server IdentityServer { get; } = new(Constants.IDENTITY_CERT_PATH, Constants.IDENTITY_CERT_KEY_PATH)
@@ -109,6 +111,7 @@ namespace Streetwriters.Common
             Domain = Constants.IDENTITY_SERVER_DOMAIN,
             Port = Constants.IDENTITY_SERVER_PORT,
             Hostname = Constants.IDENTITY_SERVER_HOST,
+            Id = "auth"
         };
 
         public static Server SubscriptionServer { get; } = new(Constants.SUBSCRIPTIONS_CERT_PATH, Constants.SUBSCRIPTIONS_CERT_KEY_PATH)
@@ -116,6 +119,7 @@ namespace Streetwriters.Common
             Domain = Constants.SUBSCRIPTIONS_SERVER_DOMAIN,
             Port = Constants.SUBSCRIPTIONS_SERVER_PORT,
             Hostname = Constants.SUBSCRIPTIONS_SERVER_HOST,
+            Id = "subscription"
         };
     }
 }

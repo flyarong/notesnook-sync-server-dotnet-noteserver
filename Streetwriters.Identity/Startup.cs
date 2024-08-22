@@ -40,6 +40,7 @@ using MongoDB.Bson.Serialization;
 using Quartz;
 using Streetwriters.Common;
 using Streetwriters.Common.Extensions;
+using Streetwriters.Common.Interfaces;
 using Streetwriters.Common.Messages;
 using Streetwriters.Common.Models;
 using Streetwriters.Identity.Helpers;
@@ -165,6 +166,7 @@ namespace Streetwriters.Identity
 
             AddOperationalStore(services, new TokenCleanupOptions { Enable = true, Interval = 3600 * 12 });
 
+            services.AddScoped<IUserAccountService, UserAccountService>();
             services.AddTransient<IMFAService, MFAService>();
             services.AddControllers();
             services.AddTransient<IIntrospectionResponseGenerator, CustomIntrospectionResponseGenerator>();
@@ -190,7 +192,7 @@ namespace Streetwriters.Identity
             }
 
             app.UseCors("notesnook");
-            app.UseVersion();
+            app.UseVersion(Servers.IdentityServer);
 
             app.UseRouting();
 
@@ -201,7 +203,9 @@ namespace Streetwriters.Identity
 
             app.UseWamp(WampServers.IdentityServer, (realm, server) =>
             {
-                realm.Subscribe(server.Topics.CreateSubscriptionTopic, async (CreateSubscriptionMessage message) =>
+                realm.Services.RegisterCallee(() => app.ApplicationServices.CreateScope().ServiceProvider.GetRequiredService<IUserAccountService>());
+
+                realm.Subscribe(SubscriptionServerTopics.CreateSubscriptionTopic, async (CreateSubscriptionMessage message) =>
                 {
                     using (var serviceScope = app.ApplicationServices.CreateScope())
                     {
@@ -210,7 +214,7 @@ namespace Streetwriters.Identity
                         await MessageHandlers.CreateSubscription.Process(message, userManager);
                     }
                 });
-                realm.Subscribe(server.Topics.DeleteSubscriptionTopic, async (DeleteSubscriptionMessage message) =>
+                realm.Subscribe(SubscriptionServerTopics.DeleteSubscriptionTopic, async (DeleteSubscriptionMessage message) =>
                 {
                     using (var serviceScope = app.ApplicationServices.CreateScope())
                     {
@@ -236,7 +240,7 @@ namespace Streetwriters.Identity
                 cm.SetIgnoreExtraElements(true);
             });
 
-            services.AddScoped<IPersistedGrantDbContext, CustomPersistedGrantDbContext>();
+            services.AddSingleton<IPersistedGrantDbContext, CustomPersistedGrantDbContext>();
             services.AddTransient<IPersistedGrantStore, PersistedGrantStore>();
             services.AddTransient<TokenCleanup>();
 

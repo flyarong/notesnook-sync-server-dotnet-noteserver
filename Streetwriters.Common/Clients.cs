@@ -29,19 +29,19 @@ namespace Streetwriters.Common
 {
     public class Clients
     {
-        private static Client Notesnook = new Client
+        public static readonly Client Notesnook = new()
         {
             Id = "notesnook",
             Name = "Notesnook",
             SenderEmail = Constants.NOTESNOOK_SENDER_EMAIL,
-            SenderName = Constants.NOTESNOOK_SENDER_NAME,
+            SenderName = "Notesnook",
             Type = ApplicationType.NOTESNOOK,
             AppId = ApplicationType.NOTESNOOK,
             AccountRecoveryRedirectURL = $"{Constants.NOTESNOOK_APP_HOST}/account/recovery",
             EmailConfirmedRedirectURL = $"{Constants.NOTESNOOK_APP_HOST}/account/verified",
             OnEmailConfirmed = async (userId) =>
             {
-                await WampServers.MessengerServer.PublishMessageAsync(WampServers.MessengerServer.Topics.SendSSETopic, new SendSSEMessage
+                await WampServers.MessengerServer.PublishMessageAsync(MessengerServerTopics.SendSSETopic, new SendSSEMessage
                 {
                     UserId = userId,
                     Message = new Message
@@ -53,7 +53,7 @@ namespace Streetwriters.Common
             }
         };
 
-        public static Dictionary<string, Client> ClientsMap = new Dictionary<string, Client>
+        public static Dictionary<string, Client> ClientsMap = new()
         {
             { "notesnook", Notesnook }
         };

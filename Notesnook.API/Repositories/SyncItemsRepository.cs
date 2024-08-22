@@ -24,27 +24,36 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using IdentityModel;
 using Microsoft.VisualBasic;
 using MongoDB.Bson;
 using MongoDB.Driver;
+using Notesnook.API.Hubs;
 using Notesnook.API.Interfaces;
 using Notesnook.API.Models;
 using Streetwriters.Common;
+using Streetwriters.Data.DbContexts;
 using Streetwriters.Data.Interfaces;
 using Streetwriters.Data.Repositories;
 
 namespace Notesnook.API.Repositories
 {
-    public class SyncItemsRepository<T> : Repository<SyncItem> where T : SyncItem
+    public class SyncItemsRepository : Repository<SyncItem>
     {
-        public SyncItemsRepository(IDbContext dbContext, string databaseName, string collectionName) : base(dbContext, databaseName, collectionName)
+        private readonly string collectionName;
+        public SyncItemsRepository(IDbContext dbContext, IMongoCollection<SyncItem> collection) : base(dbContext, collection)
         {
-            Collection.Indexes.CreateOne(new CreateIndexModel<SyncItem>(Builders<SyncItem>.IndexKeys.Ascending(i => i.UserId).Descending(i => i.DateSynced)));
-            Collection.Indexes.CreateOne(new CreateIndexModel<SyncItem>(Builders<SyncItem>.IndexKeys.Ascending(i => i.UserId).Ascending((i) => i.ItemId)));
-            Collection.Indexes.CreateOne(new CreateIndexModel<SyncItem>(Builders<SyncItem>.IndexKeys.Ascending(i => i.UserId)));
+            this.collectionName = collection.CollectionNamespace.CollectionName;
+#if DEBUG
+            Collection.Indexes.CreateMany([
+                new CreateIndexModel<SyncItem>(Builders<SyncItem>.IndexKeys.Ascending("UserId").Descending("DateSynced")),
+                new CreateIndexModel<SyncItem>(Builders<SyncItem>.IndexKeys.Ascending("UserId").Ascending("ItemId")),
+                new CreateIndexModel<SyncItem>(Builders<SyncItem>.IndexKeys.Ascending("UserId"))
+            ]);
+#endif
         }
 
-        private readonly List<string> ALGORITHMS = new List<string> { Algorithms.Default };
+        private readonly List<string> ALGORITHMS = [Algorithms.Default];
         private bool IsValidAlgorithm(string algorithm)
         {
             return ALGORITHMS.Contains(algorithm);
@@ -52,51 +61,49 @@ namespace Notesnook.API.Repositories
 
         public Task<long> CountItemsSyncedAfterAsync(string userId, long timestamp)
         {
-            return Collection.CountDocumentsAsync(n => (n.DateSynced > timestamp) && n.UserId.Equals(userId));
+            var filter = Builders<SyncItem>.Filter.And(Builders<SyncItem>.Filter.Gt("DateSynced", timestamp), Builders<SyncItem>.Filter.Eq("UserId", userId));
+            return Collection.CountDocumentsAsync(filter);
         }
         public Task<IAsyncCursor<SyncItem>> FindItemsSyncedAfter(string userId, long timestamp, int batchSize)
         {
-            return Collection.FindAsync(n => (n.DateSynced > timestamp) && n.UserId.Equals(userId), new FindOptions<SyncItem>
+            var filter = Builders<SyncItem>.Filter.And(Builders<SyncItem>.Filter.Gt("DateSynced", timestamp), Builders<SyncItem>.Filter.Eq("UserId", userId));
+            return Collection.FindAsync(filter, new FindOptions<SyncItem>
             {
                 BatchSize = batchSize,
                 AllowDiskUse = true,
                 AllowPartialResults = false,
                 NoCursorTimeout = true,
-                Sort = new SortDefinitionBuilder<SyncItem>().Ascending((a) => a.Id)
+                Sort = new SortDefinitionBuilder<SyncItem>().Ascending("_id")
             });
         }
-        // public async Task DeleteIdsAsync(string[] ids, string userId, CancellationToken token = default(CancellationToken))
-        // {
-        //     await Collection.DeleteManyAsync<T>((i) => ids.Contains(i.Id) && i.UserId == userId, token);
-        // }
+
+        public Task<IAsyncCursor<SyncItem>> FindItemsById(string userId, IEnumerable<string> ids, bool all, int batchSize)
+        {
+            var filters = new List<FilterDefinition<SyncItem>>(new[] { Builders<SyncItem>.Filter.Eq("UserId", userId) });
+
+            if (!all) filters.Add(Builders<SyncItem>.Filter.In("ItemId", ids));
+
+            return Collection.FindAsync(Builders<SyncItem>.Filter.And(filters), new FindOptions<SyncItem>
+            {
+                BatchSize = batchSize,
+                AllowDiskUse = true,
+                AllowPartialResults = false,
+                NoCursorTimeout = true
+            });
+        }
 
         public void DeleteByUserId(string userId)
         {
-            dbContext.AddCommand((handle, ct) => Collection.DeleteManyAsync(handle, (i) => i.UserId == userId, cancellationToken: ct));
-        }
-
-        public async Task UpsertAsync(SyncItem item, string userId, long dateSynced)
-        {
-
-            if (item.Length > 15 * 1024 * 1024)
+            var filter = Builders<SyncItem>.Filter.Eq("UserId", userId);
+            var writes = new List<WriteModel<SyncItem>>
             {
-                throw new Exception($"Size of item \"{item.ItemId}\" is too large. Maximum allowed size is 15 MB.");
-            }
-
-            if (!IsValidAlgorithm(item.Algorithm))
-            {
-                throw new Exception($"Invalid alg identifier {item.Algorithm}");
-            }
-
-            item.DateSynced = dateSynced;
-            item.UserId = userId;
-
-            await base.UpsertAsync(item, (x) => (x.ItemId == item.ItemId) && x.UserId == userId);
+                new DeleteManyModel<SyncItem>(filter)
+            };
+            dbContext.AddCommand((handle, ct) => Collection.BulkWriteAsync(handle, writes, options: null, ct));
         }
 
         public void Upsert(SyncItem item, string userId, long dateSynced)
         {
-
             if (item.Length > 15 * 1024 * 1024)
             {
                 throw new Exception($"Size of item \"{item.ItemId}\" is too large. Maximum allowed size is 15 MB.");
@@ -107,11 +114,92 @@ namespace Notesnook.API.Repositories
                 throw new Exception($"Invalid alg identifier {item.Algorithm}");
             }
 
+            // Handle case where the cipher is corrupted.
+            if (!IsBase64String(item.Cipher))
+            {
+                Slogger<SyncHub>.Error("Upsert", "Corrupted", item.ItemId, item.Length.ToString(), item.Cipher);
+                throw new Exception($"Corrupted item \"{item.ItemId}\" in collection \"{this.collectionName}\". Please report this error to support@streetwriters.co.");
+            }
+
             item.DateSynced = dateSynced;
             item.UserId = userId;
 
-            // await base.UpsertAsync(item, (x) => (x.ItemId == item.ItemId) && x.UserId == userId);
-            base.Upsert(item, (x) => (x.ItemId == item.ItemId) && x.UserId == userId);
+            var filter = Builders<SyncItem>.Filter.And(
+                Builders<SyncItem>.Filter.Eq("UserId", userId),
+                Builders<SyncItem>.Filter.Eq("ItemId", item.ItemId)
+            );
+
+            dbContext.AddCommand((handle, ct) => Collection.ReplaceOneAsync(handle, filter, item, new ReplaceOptions { IsUpsert = true }, ct));
+        }
+
+        public void UpsertMany(IEnumerable<SyncItem> items, string userId, long dateSynced)
+        {
+            var userIdFilter = Builders<SyncItem>.Filter.Eq("UserId", userId);
+            var writes = new List<WriteModel<SyncItem>>();
+            foreach (var item in items)
+            {
+                if (item.Length > 15 * 1024 * 1024)
+                {
+                    throw new Exception($"Size of item \"{item.ItemId}\" is too large. Maximum allowed size is 15 MB.");
+                }
+
+                if (!IsValidAlgorithm(item.Algorithm))
+                {
+                    throw new Exception($"Invalid alg identifier {item.Algorithm}");
+                }
+
+                // Handle case where the cipher is corrupted.
+                if (!IsBase64String(item.Cipher))
+                {
+                    Slogger<SyncHub>.Error("Upsert", "Corrupted", item.ItemId, item.Length.ToString(), item.Cipher);
+                    throw new Exception($"Corrupted item \"{item.ItemId}\" in collection \"{this.collectionName}\". Please report this error to support@streetwriters.co.");
+                }
+
+                var filter = Builders<SyncItem>.Filter.And(
+                    userIdFilter,
+                    Builders<SyncItem>.Filter.Eq("ItemId", item.ItemId)
+                );
+
+                item.DateSynced = dateSynced;
+                item.UserId = userId;
+
+                writes.Add(new ReplaceOneModel<SyncItem>(filter, item)
+                {
+                    IsUpsert = true
+                });
+            }
+            dbContext.AddCommand((handle, ct) => Collection.BulkWriteAsync(handle, writes, options: new BulkWriteOptions { IsOrdered = false }, ct));
+        }
+
+        private static bool IsBase64String(string value)
+        {
+            if (value == null || value.Length == 0 || value.Contains(' ') || value.Contains('\t') || value.Contains('\r') || value.Contains('\n'))
+                return false;
+            var index = value.Length - 1;
+            if (value[index] == '=')
+                index--;
+            if (value[index] == '=')
+                index--;
+            for (var i = 0; i <= index; i++)
+                if (IsInvalidBase64Char(value[i]))
+                    return false;
+            return true;
+        }
+
+        private static bool IsInvalidBase64Char(char value)
+        {
+            var code = (int)value;
+            // 1 - 9
+            if (code >= 48 && code <= 57)
+                return false;
+            // A - Z
+            if (code >= 65 && code <= 90)
+                return false;
+            // a - z
+            if (code >= 97 && code <= 122)
+                return false;
+            // - & _
+            return code != 45 && code != 95;
         }
     }
 }

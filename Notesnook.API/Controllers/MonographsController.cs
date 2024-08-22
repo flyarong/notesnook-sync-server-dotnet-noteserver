@@ -20,9 +20,11 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 using System;
 using System.Linq;
 using System.Security.Claims;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using MongoDB.Driver;
 using Notesnook.API.Models;
 using Streetwriters.Data.Interfaces;
 using Streetwriters.Data.Repositories;
@@ -74,6 +76,9 @@ namespace Notesnook.API.Controllers
         {
             if (await Monographs.GetAsync(monograph.Id) == null) return NotFound();
 
+            if (monograph.EncryptedContent?.Cipher.Length > MAX_DOC_SIZE || monograph.CompressedContent?.Length > MAX_DOC_SIZE)
+                return base.BadRequest("Monograph is too big. Max allowed size is 15mb.");
+
             if (monograph.EncryptedContent == null)
                 monograph.CompressedContent = monograph.Content.CompressBrotli();
             else
@@ -95,8 +100,11 @@ namespace Notesnook.API.Controllers
             var userId = this.User.FindFirstValue("sub");
             if (userId == null) return Unauthorized();
 
-            var userMonographs = await Monographs.FindAsync((m) => m.UserId == userId);
-            return Ok(userMonographs.Select((m) => m.Id));
+            var monographs = (await Monographs.Collection.FindAsync(Builders<Monograph>.Filter.Eq("UserId", userId), new FindOptions<Monograph, ObjectWithId>
+            {
+                Projection = Builders<Monograph>.Projection.Include("_id"),
+            })).ToEnumerable();
+            return Ok(monographs.Select((m) => m.Id));
         }
 
 
@@ -114,14 +122,30 @@ namespace Notesnook.API.Controllers
                 });
             }
 
-            if (monograph.SelfDestruct)
-                await Monographs.DeleteByIdAsync(monograph.Id);
-
             if (monograph.EncryptedContent == null)
                 monograph.Content = monograph.CompressedContent.DecompressBrotli();
             return Ok(monograph);
         }
 
+        [HttpGet("{id}/destruct")]
+        [AllowAnonymous]
+        public async Task<IActionResult> DestructMonographAsync([FromRoute] string id)
+        {
+            var monograph = await Monographs.GetAsync(id);
+            if (monograph == null)
+            {
+                return NotFound(new
+                {
+                    error = "invalid_id",
+                    error_description = $"No such monograph found."
+                });
+            }
+
+            if (monograph.SelfDestruct)
+                await Monographs.DeleteByIdAsync(monograph.Id);
+
+            return Ok();
+        }
 
         [HttpDelete("{id}")]
         public async Task<IActionResult> DeleteAsync([FromRoute] string id)

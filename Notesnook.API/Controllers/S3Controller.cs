@@ -29,7 +29,6 @@ namespace Notesnook.API.Controllers
 {
     [ApiController]
     [Route("s3")]
-    [Authorize("Sync")]
     [ResponseCache(NoStore = true, Location = ResponseCacheLocation.None)]
     public class S3Controller : ControllerBase
     {
@@ -40,6 +39,7 @@ namespace Notesnook.API.Controllers
         }
 
         [HttpPut]
+        [Authorize("Pro")]
         public IActionResult Upload([FromQuery] string name)
         {
             var userId = this.User.FindFirstValue("sub");
@@ -50,6 +50,7 @@ namespace Notesnook.API.Controllers
 
 
         [HttpGet("multipart")]
+        [Authorize("Pro")]
         public async Task<IActionResult> MultipartUpload([FromQuery] string name, [FromQuery] int parts, [FromQuery] string uploadId)
         {
             var userId = this.User.FindFirstValue("sub");
@@ -62,6 +63,7 @@ namespace Notesnook.API.Controllers
         }
 
         [HttpDelete("multipart")]
+        [Authorize("Pro")]
         public async Task<IActionResult> AbortMultipartUpload([FromQuery] string name, [FromQuery] string uploadId)
         {
             var userId = this.User.FindFirstValue("sub");
@@ -74,6 +76,7 @@ namespace Notesnook.API.Controllers
         }
 
         [HttpPost("multipart")]
+        [Authorize("Pro")]
         public async Task<IActionResult> CompleteMultipartUpload([FromBody] CompleteMultipartUploadRequest uploadRequest)
         {
             var userId = this.User.FindFirstValue("sub");
@@ -86,7 +89,7 @@ namespace Notesnook.API.Controllers
         }
 
         [HttpGet]
-        [Authorize]
+        [Authorize("Sync")]
         public IActionResult Download([FromQuery] string name)
         {
             var userId = this.User.FindFirstValue("sub");
@@ -96,18 +99,17 @@ namespace Notesnook.API.Controllers
         }
 
         [HttpHead]
-        [Authorize]
+        [Authorize("Sync")]
         public async Task<IActionResult> Info([FromQuery] string name)
         {
             var userId = this.User.FindFirstValue("sub");
             var size = await S3Service.GetObjectSizeAsync(userId, name);
-            if (size == null) return BadRequest();
-
             HttpContext.Response.Headers.ContentLength = size;
             return Ok();
         }
 
         [HttpDelete]
+        [Authorize("Sync")]
         public async Task<IActionResult> DeleteAsync([FromQuery] string name)
         {
             try

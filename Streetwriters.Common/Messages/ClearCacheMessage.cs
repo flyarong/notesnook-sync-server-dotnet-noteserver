@@ -17,20 +17,22 @@ You should have received a copy of the Affero GNU General Public License
 along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-using System.Threading.Tasks;
-using Microsoft.AspNetCore.Authorization;
+using System.Collections.Generic;
+using System.Runtime.Serialization;
+using System.Text.Json.Serialization;
+using Streetwriters.Common.Enums;
+using Streetwriters.Common.Interfaces;
 
-namespace Notesnook.API.Authorization
+namespace Streetwriters.Common.Messages
 {
-    public class EmailVerifiedRequirement : AuthorizationHandler<EmailVerifiedRequirement>, IAuthorizationRequirement
+    public class ClearCacheMessage
     {
-        protected override Task HandleRequirementAsync(AuthorizationHandlerContext context, EmailVerifiedRequirement requirement)
+        public ClearCacheMessage(List<string> keys)
         {
-            var isEmailVerified = context.User.HasClaim("verified", "true");
-            var isUserBasic = context.User.HasClaim("notesnook:status", "basic") || context.User.HasClaim("notesnook:status", "premium_expired");
-            if (!isUserBasic || isEmailVerified)
-                context.Succeed(requirement);
-            return Task.CompletedTask;
+            this.Keys = keys;
         }
+
+        [JsonPropertyName("keys")]
+        public List<string> Keys { get; set; }
     }
 }
